@@ -1,3 +1,6 @@
 .detected_hashes
 __pycache__/
 *.pyc
+
+# Runtime detection output (local findings, not source)
+detected/
