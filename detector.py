@@ -40,6 +40,33 @@ SKIP_PATH_SEGMENTS = {
     ".claude",
 }
 
+SELF_REFERENCE_MARKERS = (
+    "Toroidal Detector",
+    "toroidal-detector",
+    "PostToolUse hook",
+    "pattern-matches the output against",
+    "detected/security",
+    "detected/bugs",
+    "detected/smart-contract",
+)
+
+DOC_LINE_RE = re.compile(
+    r"^\s*(?:"
+    r"\|.*\|.*\|"
+    r"|#{1,4}\s"
+    r"|```"
+    r"|\*\*.*\*\*.*\|"
+    r"|[-*]\s.*(?:pattern|detect|scan|flag|match)"
+    r")",
+    re.IGNORECASE,
+)
+
+HEX_KEY_CONTEXT_RE = re.compile(
+    r"(?:private|secret|key|wallet|mnemonic|seed).{0,50}0x[0-9a-fA-F]{64}\b"
+    r"|0x[0-9a-fA-F]{64}\b.{0,50}(?:private|secret|key|wallet)",
+    re.IGNORECASE,
+)
+
 SECURITY_PATTERNS = [
     (r"CVE-\d{4}-\d{4,}", "cve", "security", "high"),
     (r"GHSA-[\w-]+", "ghsa", "security", "high"),
@@ -346,7 +373,13 @@ CODE_PATTERNS_RAW = [
     (r"gho_[A-Za-z0-9]{36}", "github-oauth-token", "security", "critical"),
     (r"xox[bpsa]-[A-Za-z0-9\-]{10,}", "slack-token", "security", "critical"),
     (r"sk-[A-Za-z0-9]{20,}", "openai-secret-key", "security", "critical"),
-    (r"0x[0-9a-fA-F]{64}\b", "hex-private-key-256bit", "security", "high"),
+    (
+        r"(?:private|secret|key|wallet|mnemonic|seed).{0,50}0x[0-9a-fA-F]{64}\b"
+        r"|0x[0-9a-fA-F]{64}\b.{0,50}(?:private|secret|key|wallet)",
+        "hex-private-key-256bit",
+        "security",
+        "high",
+    ),
     (
         r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
         "hardcoded-jwt",
@@ -732,6 +765,30 @@ def save_detected(
     )
 
 
+def _is_self_reference(text: str) -> bool:
+    hits = sum(1 for marker in SELF_REFERENCE_MARKERS if marker in text)
+    return hits >= 2
+
+
+def _strip_doc_lines(text: str) -> str:
+    lines = []
+    for line in text.split("\n"):
+        # Strip git diff prefixes before checking for doc patterns
+        clean = line.lstrip("+-").lstrip()
+        if clean.startswith("|") and clean.count("|") >= 3:
+            continue
+        if len(clean) > 1 and clean[0] == "#" and clean[1] in (" ", "#"):
+            continue
+        if clean.startswith("```"):
+            continue
+        if clean.startswith("**") and "|" in clean:
+            continue
+        if DOC_LINE_RE.match(clean):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _should_skip_path(path: str) -> bool:
     parts = path.replace("\\", "/").split("/")
     return any(seg in SKIP_PATH_SEGMENTS for seg in parts)
@@ -868,6 +925,13 @@ def main():
         server = tool_input.get("server", "")
         if server in {"memory", "torus-skills", "search"}:
             sys.exit(0)
+
+    if _is_self_reference(response):
+        sys.exit(0)
+
+    response = _strip_doc_lines(response)
+    if len(response) < 30:
+        sys.exit(0)
 
     working_dir = command[:100] if tool_name == "Bash" else ""
     _scan_and_save(
